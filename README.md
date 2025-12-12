@@ -9,7 +9,7 @@ Built using ESP32, VL53L0X ToF sensors, N20 motors with encoders, and a TB6612FN
 ⚙️ Robot Architecture
 Core Components
 
-MCU: ESP32 DevKit
+MCU: ESP32 DevKit V1
 
 Sensors: 3× VL53L0X ToF distance sensors
 
