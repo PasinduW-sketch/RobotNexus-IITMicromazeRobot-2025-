@@ -1,0 +1,361 @@
+#include <Wire.h>
+#include <Adafruit_VL53L0X.h>
+
+// === Motor Control Pins ===
+#define PWMA  12   // Left motor PWM
+#define AIN1  13
+#define AIN2  14
+
+#define PWMB  25   // Right motor PWM
+#define BIN1  19
+#define BIN2  18
+
+#define STBY  21   // Standby pin
+
+// === XSHUT pins for each ToF sensor ===
+#define TOF_FRONT_XSHUT 27
+#define TOF_LEFT_XSHUT  26
+#define TOF_RIGHT_XSHUT 33
+
+// Motor speeds
+#define BASE_SPEED 180
+#define TURN_SPEED 200
+#define SLOW_SPEED 120
+#define TURN_DURATION 400  // ms for 90 degree turn
+
+// Distance thresholds (in mm)
+#define OBSTACLE_CLOSE 100
+#define OBSTACLE_FAR 250
+#define WALL_FOLLOW_DISTANCE 150
+#define PATH_WIDTH 200     // Minimum width for a valid path
+#define JUNCTION_THRESHOLD 300  // Distance to detect opening
+
+// Maze solving parameters
+#define MAX_PATH_MEMORY 100  // Maximum path steps to remember
+
+// Create sensor objects
+Adafruit_VL53L0X tofFront = Adafruit_VL53L0X();
+Adafruit_VL53L0X tofLeft  = Adafruit_VL53L0X();
+Adafruit_VL53L0X tofRight = Adafruit_VL53L0X();
+
+// Path memory variables
+char pathMemory[MAX_PATH_MEMORY];  // 'L', 'R', 'S' for turns and straights
+int pathIndex = 0;
+bool solvingMaze = true;
+bool returnJourney = false;
+
+// Junction detection
+bool atJunction = false;
+unsigned long junctionTime = 0;
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println("Initializing maze-solving robot...");
+
+  // Initialize I2C
+  Wire.begin(22, 23); // SDA, SCL
+
+  // Set XSHUT pins as outputs
+  pinMode(TOF_FRONT_XSHUT, OUTPUT);
+  pinMode(TOF_LEFT_XSHUT, OUTPUT);
+  pinMode(TOF_RIGHT_XSHUT, OUTPUT);
+
+  // Reset all sensors
+  digitalWrite(TOF_FRONT_XSHUT, LOW);
+  digitalWrite(TOF_LEFT_XSHUT, LOW);
+  digitalWrite(TOF_RIGHT_XSHUT, LOW);
+  delay(10);
+
+  // Initialize ToF sensors one by one with different addresses
+  initializeTofSensor(tofFront, TOF_FRONT_XSHUT, 0x30);
+  initializeTofSensor(tofLeft, TOF_LEFT_XSHUT, 0x31);
+  initializeTofSensor(tofRight, TOF_RIGHT_XSHUT, 0x32);
+
+  // Motor pins
+  pinMode(AIN1, OUTPUT);
+  pinMode(AIN2, OUTPUT);
+  pinMode(PWMA, OUTPUT);
+  
+  pinMode(BIN1, OUTPUT);
+  pinMode(BIN2, OUTPUT);
+  pinMode(PWMB, OUTPUT);
+
+  pinMode(STBY, OUTPUT);
+  digitalWrite(STBY, HIGH); // Enable TB6612
+
+  // Initialize path memory
+  for (int i = 0; i < MAX_PATH_MEMORY; i++) {
+    pathMemory[i] = ' ';
+  }
+
+  Serial.println("Maze solver ready! Starting exploration...");
+}
+
+// Initialize a ToF sensor with a specific address
+void initializeTofSensor(Adafruit_VL53L0X &sensor, uint8_t xshutPin, uint8_t address) {
+  digitalWrite(xshutPin, HIGH);
+  delay(20);
+  
+  // Initialize sensor
+  if (!sensor.begin(address)) {
+    Serial.print("ToF sensor at pin ");
+    Serial.print(xshutPin);
+    Serial.println(" failed!");
+    while (1);
+  }
+  
+  Serial.print("ToF sensor at pin ");
+  Serial.print(xshutPin);
+  Serial.println(" ready!");
+}
+
+// Read distance from a ToF sensor
+uint16_t readTofDistance(Adafruit_VL53L0X &sensor) {
+  VL53L0X_RangingMeasurementData_t measure;
+  sensor.rangingTest(&measure, false);
+  
+  if (measure.RangeStatus != 4) {
+    return measure.RangeMilliMeter;
+  } else {
+    return 9999;  // Error or out of range
+  }
+}
+
+// Motor control
+void setMotor(int leftSpeed, int rightSpeed) {
+  // Constrain speeds to valid PWM range
+  leftSpeed = constrain(leftSpeed, -255, 255);
+  rightSpeed = constrain(rightSpeed, -255, 255);
+  
+  // Left motor control
+  if (leftSpeed > 0) { 
+    digitalWrite(AIN1, HIGH); 
+    digitalWrite(AIN2, LOW); 
+  } else if (leftSpeed < 0) { 
+    digitalWrite(AIN1, LOW); 
+    digitalWrite(AIN2, HIGH); 
+  } else { 
+    digitalWrite(AIN1, LOW); 
+    digitalWrite(AIN2, LOW); 
+  }
+  analogWrite(PWMA, abs(leftSpeed));
+
+  // Right motor control
+  if (rightSpeed > 0) { 
+    digitalWrite(BIN1, HIGH); 
+    digitalWrite(BIN2, LOW); 
+  } else if (rightSpeed < 0) { 
+    digitalWrite(BIN1, LOW); 
+    digitalWrite(BIN2, HIGH); 
+  } else { 
+    digitalWrite(BIN1, LOW); 
+    digitalWrite(BIN2, LOW); 
+  }
+  analogWrite(PWMB, abs(rightSpeed));
+}
+
+// Movement functions
+void moveForward() { 
+  setMotor(BASE_SPEED, BASE_SPEED); 
+}
+
+void moveBackward(int duration = 300) { 
+  setMotor(-BASE_SPEED, -BASE_SPEED);
+  delay(duration);
+  setMotor(0, 0);
+}
+
+void turnLeft(int duration = TURN_DURATION) { 
+  setMotor(-TURN_SPEED, TURN_SPEED);
+  delay(duration);
+  setMotor(0, 0);
+}
+
+void turnRight(int duration = TURN_DURATION) { 
+  setMotor(TURN_SPEED, -TURN_SPEED);
+  delay(duration);
+  setMotor(0, 0);
+}
+
+void stopMotors() { 
+  setMotor(0, 0); 
+}
+
+void smoothLeft() {
+  setMotor(SLOW_SPEED, BASE_SPEED);
+}
+
+void smoothRight() {
+  setMotor(BASE_SPEED, SLOW_SPEED);
+}
+
+// Check if we're at a junction
+bool checkJunction(uint16_t leftDist, uint16_t rightDist) {
+  // A junction has openings on at least one side
+  return (leftDist > JUNCTION_THRESHOLD || rightDist > JUNCTION_THRESHOLD);
+}
+
+// Record a turn in path memory
+void recordTurn(char direction) {
+  if (pathIndex < MAX_PATH_MEMORY - 1) {
+    pathMemory[pathIndex++] = direction;
+    Serial.print("Recorded turn: ");
+    Serial.println(direction);
+  }
+}
+
+// Simplify the path by removing dead ends
+void simplifyPath() {
+  // This is a simplified version - in a real implementation
+  // you would remove loops like LBR -> S (Left, Back, Right becomes Straight)
+  Serial.println("Path simplification would happen here");
+}
+
+// Execute the return journey using memorized path
+void executeReturnJourney() {
+  Serial.println("Starting return journey");
+  
+  // Turn around 180 degrees
+  turnLeft(TURN_DURATION * 2);
+  delay(500);
+  
+  // Follow the path in reverse, taking opposite turns
+  for (int i = pathIndex - 1; i >= 0; i--) {
+    Serial.print("Executing step ");
+    Serial.print(i);
+    Serial.print(": ");
+    Serial.println(pathMemory[i]);
+    
+    // Move forward until we reach the next junction
+    unsigned long startTime = millis();
+    while (millis() - startTime < 2000) {  // Move for 2 seconds or until junction
+      uint16_t frontDist = readTofDistance(tofFront);
+      uint16_t leftDist = readTofDistance(tofLeft);
+      uint16_t rightDist = readTofDistance(tofRight);
+      
+      if (frontDist < OBSTACLE_CLOSE) {
+        moveBackward();
+        break;
+      }
+      
+      // Basic wall following during straight segments
+      if (leftDist < WALL_FOLLOW_DISTANCE) {
+        smoothRight();
+      } else if (rightDist < WALL_FOLLOW_DISTANCE) {
+        smoothLeft();
+      } else {
+        moveForward();
+      }
+      
+      delay(50);
+    }
+    
+    stopMotors();
+    delay(500);
+    
+    // Make the opposite turn from the original path
+    if (pathMemory[i] == 'L') {
+      turnRight();
+    } else if (pathMemory[i] == 'R') {
+      turnLeft();
+    }
+    // If it was straight, just continue
+  }
+  
+  Serial.println("Return journey completed!");
+  while(1) { stopMotors(); delay(1000); } // Stop forever
+}
+
+// Main maze solving logic
+void solveMaze(uint16_t frontDist, uint16_t leftDist, uint16_t rightDist) {
+  // Print sensor readings
+  Serial.print("Front: ");
+  Serial.print(frontDist);
+  Serial.print(" mm | Left: ");
+  Serial.print(leftDist);
+  Serial.print(" mm | Right: ");
+  Serial.print(rightDist);
+  Serial.println(" mm");
+  
+  // Check if we're at a junction
+  bool junctionDetected = checkJunction(leftDist, rightDist);
+  
+  if (junctionDetected && !atJunction) {
+    atJunction = true;
+    junctionTime = millis();
+    stopMotors();
+    delay(300);  // Pause to ensure we're centered at the junction
+    
+    Serial.println("Junction detected!");
+    
+    // Decision making at junction
+    // Prefer right turns (right-hand rule for maze solving)
+    if (rightDist > PATH_WIDTH) {
+      recordTurn('R');
+      turnRight();
+    } 
+    else if (frontDist > OBSTACLE_FAR) {
+      recordTurn('S');  // Straight
+      moveForward();
+    }
+    else if (leftDist > PATH_WIDTH) {
+      recordTurn('L');
+      turnLeft();
+    }
+    else {
+      // Dead end, need to turn around
+      recordTurn('B');  // Back (180 turn)
+      turnLeft(TURN_DURATION * 2);  // 180 degree turn
+    }
+    
+    delay(300);
+  } 
+  else if (atJunction && millis() - junctionTime > 1000) {
+    atJunction = false;  // Reset junction flag after passing it
+  }
+  // Emergency stop if very close to obstacle
+  else if (frontDist < OBSTACLE_CLOSE) {
+    moveBackward();
+    stopMotors();
+    delay(100);
+  }
+  // Normal navigation when not at a junction
+  else {
+    // Wall following behavior
+    if (leftDist < WALL_FOLLOW_DISTANCE) {
+      smoothRight();
+    } 
+    else if (rightDist < WALL_FOLLOW_DISTANCE) {
+      smoothLeft();
+    } 
+    else {
+      moveForward();
+    }
+  }
+  
+  // Check if we've reached the end of the maze (large open space)
+  if (leftDist > 500 && rightDist > 500 && frontDist > 500) {
+    Serial.println("Maze solved! Preparing return journey...");
+    delay(2000);
+    simplifyPath();
+    returnJourney = true;
+    solvingMaze = false;
+  }
+}
+
+void loop() {
+  // Read distances from all three sensors
+  uint16_t frontDist = readTofDistance(tofFront);
+  uint16_t leftDist = readTofDistance(tofLeft);
+  uint16_t rightDist = readTofDistance(tofRight);
+  
+  if (solvingMaze) {
+    solveMaze(frontDist, leftDist, rightDist);
+  } 
+  else if (returnJourney) {
+    executeReturnJourney();
+  }
+  
+  delay(50);  // Short delay between readings
+}
