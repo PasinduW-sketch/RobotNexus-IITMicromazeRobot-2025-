@@ -86,9 +86,8 @@ Mihan – Mechanical Design
 Proud of the engineering, innovation, and teamwork that brought RobotNexus to life. 🚀
 
 📁 Repository Structure
-/code       → C++ source code (ESP32)
-/hardware   → Wiring diagrams, PCB files
-     → Photos, videos, architecture diagrams
+/code.ino      → C++ source code (ESP32)
+/photosmazerobot   → Wiring diagrams, PCB Photos, videos, architecture diagrams
 README.md
 
 ▶️ How to Run
@@ -109,7 +108,7 @@ Place robot at maze start and power on
 
 📸 Media
 
-Photos & videos located inside /docs.
+Photos & videos located inside /photosmazerobot.
 
 🔗 Connect With Us
 
