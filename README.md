@@ -72,22 +72,23 @@ Stable sensor voltage for clean readings
 
 👥 Team RobotNexus
 
-Niven – Mechanical Design
+Pasindu(Captain) – Embedded Programming, System Architecture & Optimization
+
+Niven*(Vice Captain) –  Power Systems
 
 Tharindu – Sensor Calibration
 
 Chamath – Algorithms & Navigation
 
-Mihan – Power Systems
+Mihan – Mechanical Design 
 
-Me – Embedded Programming, System Architecture & Optimization
 
 Proud of the engineering, innovation, and teamwork that brought RobotNexus to life. 🚀
 
 📁 Repository Structure
 /code       → C++ source code (ESP32)
 /hardware   → Wiring diagrams, PCB files
-/docs       → Photos, videos, architecture diagrams
+     → Photos, videos, architecture diagrams
 README.md
 
 ▶️ How to Run
